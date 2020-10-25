@@ -1,4 +1,4 @@
-// RUN: %clang_analyze_cc1 -verify %s
+// RUN: %clang_analyze_cc1 -analyzer-checker=alpha.unix.ObjectCount -verify %s
 
 #include "object-header.h"
 

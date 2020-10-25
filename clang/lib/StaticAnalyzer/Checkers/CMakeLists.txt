@@ -83,6 +83,7 @@ add_clang_library(clangStaticAnalyzerCheckers
   ObjCSelfInitChecker.cpp
   ObjCSuperDeallocChecker.cpp
   ObjCUnusedIVarsChecker.cpp
+  ObjectCountChecker.cpp
   OSObjectCStyleCast.cpp
   PaddingChecker.cpp
   PointerArithChecker.cpp

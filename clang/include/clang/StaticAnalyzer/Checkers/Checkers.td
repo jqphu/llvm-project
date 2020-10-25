@@ -531,6 +531,12 @@ def SimpleStreamChecker : Checker<"SimpleStream">,
   HelpText<"Check for misuses of stream APIs">,
   Documentation<HasAlphaDocumentation>;
 
+// TODO: Move this from UNIX to it's own section.
+def ObjectCountChecker : Checker<"ObjectCount">,
+  HelpText<"Checks for misuses of reference counting">,
+  // TODO: Document the count checker.
+  Documentation<NotDocumented>;
+
 def BlockInCriticalSectionChecker : Checker<"BlockInCriticalSection">,
   HelpText<"Check for calls to blocking functions inside a critical section">,
   Documentation<HasAlphaDocumentation>;
