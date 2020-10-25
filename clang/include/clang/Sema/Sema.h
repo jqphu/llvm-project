@@ -9999,7 +9999,7 @@ public:
   void AddParameterABIAttr(Decl *D, const AttributeCommonInfo &CI,
                            ParameterABI ABI);
 
-  enum class RetainOwnershipKind {NS, CF, OS};
+  enum class RetainOwnershipKind { NS, CF, OS, Object };
   void AddXConsumedAttr(Decl *D, const AttributeCommonInfo &CI,
                         RetainOwnershipKind K, bool IsTemplateInstantiation);
 

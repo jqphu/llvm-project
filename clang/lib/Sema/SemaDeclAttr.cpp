@@ -5134,6 +5134,13 @@ void Sema::AddXConsumedAttr(Decl *D, const AttributeCommonInfo &CI,
         diag::warn_ns_attribute_wrong_parameter_type,
         /*ExtraArgs=*/CI.getRange(), "cf_consumed", /*pointers*/ 1);
     return;
+  case RetainOwnershipKind::Object:
+    // TODO: Define specific types to be valid objects.
+    handleSimpleAttributeOrDiagnose<ObjectConsumedAttr>(
+        *this, VD, CI, /* Assume all types are valid. */ true,
+        diag::warn_ns_attribute_wrong_parameter_type,
+        /*ExtraArgs=*/CI.getRange(), "object_consumed", /*pointers*/ 1);
+    return;
   }
 }
 
@@ -5157,6 +5164,9 @@ parsedAttrToRetainOwnershipKind(const ParsedAttr &AL) {
   case ParsedAttr::AT_NSReturnsNotRetained:
   case ParsedAttr::AT_NSReturnsAutoreleased:
     return Sema::RetainOwnershipKind::NS;
+  case ParsedAttr::AT_ObjectConsumed:
+  case ParsedAttr::AT_ObjectReturnsAcquired:
+    return Sema::RetainOwnershipKind::Object;
   default:
     llvm_unreachable("Wrong argument supplied");
   }
@@ -5198,9 +5208,10 @@ static void handleXReturnsXRetainedAttr(Sema &S, Decl *D,
   } else if (const auto *Param = dyn_cast<ParmVarDecl>(D)) {
     // Attributes on parameters are used for out-parameters,
     // passed as pointers-to-pointers.
-    unsigned DiagID = K == Sema::RetainOwnershipKind::CF
-            ? /*pointer-to-CF-pointer*/2
-            : /*pointer-to-OSObject-pointer*/3;
+    unsigned DiagID = ((K == Sema::RetainOwnershipKind::CF) ||
+                       (K == Sema::RetainOwnershipKind::Object))
+                          ? /*pointer-to-CF-pointer*/ 2
+                          : /*pointer-to-OSObject-pointer*/ 3;
     ReturnType = Param->getType()->getPointeeType();
     if (ReturnType.isNull()) {
       S.Diag(D->getBeginLoc(), diag::warn_ns_attribute_wrong_parameter_type)
@@ -5223,6 +5234,7 @@ static void handleXReturnsXRetainedAttr(Sema &S, Decl *D,
     case ParsedAttr::AT_OSReturnsNotRetained:
     case ParsedAttr::AT_CFReturnsRetained:
     case ParsedAttr::AT_CFReturnsNotRetained:
+    case ParsedAttr::AT_ObjectReturnsAcquired:
       ExpectedDeclKind = ExpectedFunctionMethodOrParameter;
       break;
     }
@@ -5258,6 +5270,12 @@ static void handleXReturnsXRetainedAttr(Sema &S, Decl *D,
     TypeOK = isValidSubjectOfOSAttribute(ReturnType);
     Cf = true;
     ParmDiagID = 3; // Pointer-to-OSObject-pointer
+    break;
+
+  case ParsedAttr::AT_ObjectReturnsAcquired:
+    // Allow this to work on all types since we do not have a way to identify
+    // objects.
+    TypeOK = true;
     break;
   }
 
@@ -5302,6 +5320,9 @@ static void handleXReturnsXRetainedAttr(Sema &S, Decl *D,
       return;
     case ParsedAttr::AT_NSReturnsRetained:
       handleSimpleAttribute<NSReturnsRetainedAttr>(S, D, AL);
+      return;
+    case ParsedAttr::AT_ObjectReturnsAcquired:
+      handleSimpleAttribute<ObjectReturnsAcquiredAttr>(S, D, AL);
       return;
     case ParsedAttr::AT_OSReturnsRetained:
       handleSimpleAttribute<OSReturnsRetainedAttr>(S, D, AL);
@@ -7596,6 +7617,7 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_CFConsumed:
   case ParsedAttr::AT_NSConsumed:
   case ParsedAttr::AT_OSConsumed:
+  case ParsedAttr::AT_ObjectConsumed:
     S.AddXConsumedAttr(D, AL, parsedAttrToRetainOwnershipKind(AL),
                        /*IsTemplateInstantiation=*/false);
     break;
@@ -7618,6 +7640,7 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_CFReturnsRetained:
   case ParsedAttr::AT_OSReturnsNotRetained:
   case ParsedAttr::AT_OSReturnsRetained:
+  case ParsedAttr::AT_ObjectReturnsAcquired:
     handleXReturnsXRetainedAttr(S, D, AL);
     break;
   case ParsedAttr::AT_WorkGroupSizeHint:

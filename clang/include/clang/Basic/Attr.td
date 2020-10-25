@@ -955,6 +955,21 @@ def OSConsumesThis : InheritableAttr {
   let SimpleHandler = 1;
 }
 
+// Object based attributes
+// TODO: Add documentation link.
+def ObjectConsumed : InheritableParamAttr {
+  let Spellings = [Clang<"object_consumed">];
+  let Subjects = SubjectList<[ParmVar]>;
+  let Documentation = [RetainBehaviorDocs];
+}
+
+def ObjectReturnsAcquired : InheritableParamAttr {
+  let Spellings = [Clang<"object_returns_acquired">];
+  // TODO: Handle allowing return acquired from out param var.
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [RetainBehaviorDocs];
+}
+
 def Cleanup : InheritableAttr {
   let Spellings = [GCC<"cleanup">];
   let Args = [DeclArgument<Function, "FunctionDecl">];
