@@ -7593,6 +7593,16 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     handleSimpleAttributeWithExclusions<CFUnknownTransferAttr,
                                         CFAuditedTransferAttr>(S, D, AL);
     break;
+  case ParsedAttr::AT_ObjectConsumed:
+    handleSimpleAttributeOrDiagnose<ObjectConsumedAttr>(
+        S, D, AL, true,
+        /* Disallow attributes on return value */diag::warn_ns_attribute_wrong_parameter_type);
+    break;
+  case ParsedAttr::AT_ObjectReturnAcquired:
+    // Allow attributes on return value.
+    handleSimpleAttribute<ObjectReturnAcquiredAttr>(S, D, AL);
+    break;
+
   case ParsedAttr::AT_CFConsumed:
   case ParsedAttr::AT_NSConsumed:
   case ParsedAttr::AT_OSConsumed:

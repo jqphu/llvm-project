@@ -39,6 +39,9 @@ def Builtin : EnumAttr<"builtin">;
 /// Pass structure by value.
 def ByVal : TypeAttr<"byval">;
 
+/// Do I need this?
+def ObjectConsumed : EnumAttr<"object_consumed">;
+
 /// Mark in-memory ABI type.
 def ByRef : TypeAttr<"byref">;
 

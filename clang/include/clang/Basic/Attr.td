@@ -917,6 +917,18 @@ def CFConsumed : InheritableParamAttr {
   let Documentation = [RetainBehaviorDocs];
 }
 
+def ObjectConsumed : InheritableParamAttr {
+  let Spellings = [Clang<"object_consumed">];
+  let Subjects = SubjectList<[ParmVar]>;
+  let Documentation = [RetainBehaviorDocs];
+}
+
+def ObjectReturnAcquired : InheritableParamAttr {
+  let Spellings = [Clang<"object_returns_acquired">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [RetainBehaviorDocs];
+}
+
 // OSObject-based attributes.
 def OSConsumed : InheritableParamAttr {
   let Spellings = [Clang<"os_consumed">];

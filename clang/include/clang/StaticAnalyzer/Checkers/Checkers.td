@@ -531,6 +531,10 @@ def SimpleStreamChecker : Checker<"SimpleStream">,
   HelpText<"Check for misuses of stream APIs">,
   Documentation<HasAlphaDocumentation>;
 
+def ObjectCountChecker : Checker<"ObjectCount">,
+  HelpText<"Checks for mis-used reference counting">,
+  Documentation<HasAlphaDocumentation>;
+
 def BlockInCriticalSectionChecker : Checker<"BlockInCriticalSection">,
   HelpText<"Check for calls to blocking functions inside a critical section">,
   Documentation<HasAlphaDocumentation>;
