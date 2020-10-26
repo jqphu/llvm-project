@@ -81,13 +81,58 @@ typedef struct {
 } bar_t;
 
 // Can track casting.
-void test_cast(__OBJECT_CONSUMED bar_t* bar) {
+void test_cast(bar_t* bar) {
+  object_acquire((header_t*)bar);
   object_release((header_t*)bar);
 }
 
+// Test void* works with implicit casts.
+void test_void(void* bar) {
+  object_acquire(bar);
+  object_release(bar);
+}
+
 // Do not track within objects.
-void test_release_within_object(bar_t* bar, __OBJECT_CONSUMED bar_t* bar_consumed) {
+void test_release_within_object(bar_t* bar) {
+  object_acquire(bar->foo);
   object_release(bar->foo);
-  object_release(bar_consumed->foo);
-  object_release((header_t*)bar_consumed);
+
+  // This does not error, since we don't track within objects.
+  object_release(bar->foo);
+}
+
+// Can acquire and release with no errors.
+void test_acquire_release(header_t* foo) {
+  object_acquire(foo);
+  object_release(foo);
+}
+
+// Multiple calls to acquire/release.
+void test_acquire_multiple_release_multiple(header_t* foo) {
+  object_acquire(foo);
+  object_acquire(foo);
+  object_release(foo);
+
+  object_acquire(foo);
+  object_release(foo);
+  object_release(foo);
+}
+
+_Bool maybe();
+
+// Double release on a branch.
+void test_branch_double_release(header_t* foo) {
+  object_acquire(foo);
+
+  if(maybe()) {
+    object_release(foo);
+  }
+
+  object_release(foo); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}
+
+// No analysis attribute should not trigger any issues.
+__OBJECT_NO_ANALYSIS void test_no_analysis(header_t* foo) {
+  object_release(foo);
+  object_release(foo);
 }

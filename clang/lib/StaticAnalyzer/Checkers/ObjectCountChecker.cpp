@@ -24,6 +24,7 @@
 #include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramStateTrait.h"
+#include <iostream>
 #include <memory>
 
 using namespace clang;
@@ -55,6 +56,9 @@ public:
   /// Create a new RefCount that has the count decremented.
   LLVM_NODISCARD RefCount decrement() const { return RefCount(Cnt - 1); }
 
+  /// Create a new RefCount that has the count increment.
+  LLVM_NODISCARD RefCount increment() const { return RefCount(Cnt + 1); }
+
   /// Get the count for this object.
   LLVM_NODISCARD unsigned getCount() const { return Cnt; }
 
@@ -65,7 +69,7 @@ public:
 };
 
 class ObjectCountChecker
-    : public Checker<check::BeginFunction, check::PreCall> {
+    : public Checker<check::BeginFunction, check::PreCall, check::PostCall> {
   CallDescription ObjectAcquireFn{"object_acquire"};
   CallDescription ObjectAutoreleaseFn{"object_autorelease"};
   CallDescription ObjectCreateFn{"object_create"};
@@ -74,6 +78,9 @@ class ObjectCountChecker
   /// Report a bug as ReleaseNotOwned.
   void reportReleaseNotOwnedBug(SymbolRef Sym, const CallEvent &Call,
                                 CheckerContext &C) const;
+
+  /// Handle the post call for `object_acquire`.
+  void postCallObjectAcquire(const CallEvent &Call, CheckerContext &C) const;
 
 public:
   /// The bug to signal when we release something we don't own.
@@ -85,6 +92,7 @@ public:
 
   void checkBeginFunction(CheckerContext &C) const;
   void checkPreCall(const CallEvent &Call, CheckerContext &C) const;
+  void checkPostCall(const CallEvent &Call, CheckerContext &C) const;
 };
 
 } // end anonymous namespace
@@ -211,6 +219,49 @@ void ObjectCountChecker::checkPreCall(const CallEvent &Call,
 
     // Update this state transition as a decrement.
     C.addTransition(State);
+  }
+}
+/// Handle the post call logic for `object_acquire`.
+///
+/// This will increment the reference count. If it is object_acquire and the
+/// reference doesn't / exist it will **ignore this reference**. This could
+/// happen if it is a global / variable or a variable within a struct.
+void ObjectCountChecker::postCallObjectAcquire(const CallEvent &Call,
+                                               CheckerContext &C) const {
+  SymbolRef Sym = Call.getArgSVal(0).getAsLocSymbol();
+
+  // If this does not resolve to an object this is an invalid usage of the API.
+  // E.g. you can pass a integer to object_acquire which will result in this
+  // Sym being NULL.
+  // TODO: Report incorrect usage of object_acquire?
+  if (!Sym)
+    return;
+
+  ProgramStateRef State = C.getState();
+  const RefCount *Count = State->get<ObjectRefCountMap>(Sym);
+  // Not a tracked object. Assume it is global or within a struct and ignore it.
+  if (!Count)
+    return;
+
+  // Update the state to consume a reference.
+  State = State->set<ObjectRefCountMap>(Sym, Count->increment());
+
+  // Update this state transition as a increment.
+  C.addTransition(State);
+}
+
+/// Called after a function invocation to see if references counts need to be
+/// incremented (e.g. object_acquire) or if the function returns an object we
+/// now need to track.
+///
+/// Otherwise, it will see if the function returns an acquired reference and
+/// start tracking that.
+void ObjectCountChecker::checkPostCall(const CallEvent &Call,
+                                       CheckerContext &C) const {
+  if (Call.isCalled(ObjectAcquireFn)) {
+    postCallObjectAcquire(Call, C);
+  } else {
+    // TODO: Handle the object_returns_acquired attribute.
   }
 }
 
