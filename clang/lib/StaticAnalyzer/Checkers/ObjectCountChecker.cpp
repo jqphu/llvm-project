@@ -68,16 +68,18 @@ public:
   void Profile(llvm::FoldingSetNodeID &ID) const { ID.AddInteger(Cnt); }
 };
 
-class ObjectCountChecker : public Checker<check::BeginFunction, check::PreCall,
-                                          check::PostCall, check::Bind> {
+class ObjectCountChecker
+    : public Checker<check::BeginFunction, check::EndFunction, check::PreCall,
+                     check::PostCall, check::Bind> {
   CallDescription ObjectAcquireFn{"object_acquire"};
   CallDescription ObjectAutoreleaseFn{"object_autorelease"};
   CallDescription ObjectCreateFn{"object_create"};
   CallDescription ObjectReleaseFn{"object_release"};
 
-  /// Report a bug as ReleaseNotOwned.
-  void reportReleaseNotOwnedBug(SymbolRef Sym, const CallEvent &Call,
-                                CheckerContext &C) const;
+  /// Report a ref count bug.
+  void reportRefCountBug(const retaincountchecker::RefCountBug &D,
+                         SymbolRef Sym, const CallEvent *Call,
+                         CheckerContext &C) const;
 
   /// Handle the post call for `object_acquire`.
   void postCallObjectAcquire(const CallEvent &Call, CheckerContext &C) const;
@@ -91,15 +93,24 @@ class ObjectCountChecker : public Checker<check::BeginFunction, check::PreCall,
   /// non-owned object.
   void postCallUnowned(const CallEvent &Call, CheckerContext &C) const;
 
+  /// Handle logic around the return statement.
+  /// E.g. Are we returning owned references correctly?
+  void processReturnStatement(const ReturnStmt *RS, CheckerContext &C) const;
+
 public:
+  /// BugTypes below are initialized when we register the checker.
+  ///
+  /// We reuse this bug type from RetainCountDiagnostics.
+
   /// The bug to signal when we release something we don't own.
-  ///
-  /// This is initialized when we register this checker.
-  ///
-  /// We borrow this bug type from RetainCountDiagnostics.
   std::unique_ptr<retaincountchecker::RefCountBug> ReleaseNotOwned{nullptr};
+  /// Bug to signal when we return an unowned reference when expected an owned
+  /// one.
+  std::unique_ptr<retaincountchecker::RefCountBug> ReturnNotOwnedForOwned{
+      nullptr};
 
   void checkBeginFunction(CheckerContext &C) const;
+  void checkEndFunction(const ReturnStmt *RS, CheckerContext &C) const;
   void checkPreCall(const CallEvent &Call, CheckerContext &C) const;
   void checkPostCall(const CallEvent &Call, CheckerContext &C) const;
   void checkBind(SVal loc, SVal val, const Stmt *S, CheckerContext &C) const;
@@ -238,7 +249,7 @@ void ObjectCountChecker::checkPreCall(const CallEvent &Call,
 
     // Check if this is an over-release.
     if (Count->getCount() == 0) {
-      reportReleaseNotOwnedBug(Sym, Call, C);
+      reportRefCountBug(*ReleaseNotOwned, Sym, &Call, C);
       return;
     }
 
@@ -389,10 +400,74 @@ void ObjectCountChecker::checkBind(SVal loc, SVal val, const Stmt *S,
   }
 }
 
-/// Report a bug as ReleaseNotOwned.
-void ObjectCountChecker::reportReleaseNotOwnedBug(SymbolRef Sym,
-                                                  const CallEvent &Call,
-                                                  CheckerContext &C) const {
+void ObjectCountChecker::processReturnStatement(const ReturnStmt *RS,
+                                                CheckerContext &C) const {
+  const LocationContext *LCtx = C.getLocationContext();
+  const Decl *D = LCtx->getDecl();
+  const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(D);
+
+  // Only operate on function declarations and ignore no_analysis function.
+  //
+  // Since we only care about C, we ignore constructors, destructors, blocks
+  // etc. This can be expanded by converting this to an AnyCall.
+  if (!FD || hasNoAnalysisAnnotation(FD))
+    return;
+
+  // If we don't have the return acquired attribute, we do nothing.
+  // If there are any leaks, it will be detected in the leak step.
+  if (!FD->hasAttr<ObjectReturnsAcquiredAttr>())
+    return;
+
+  const Expr *RetE = RS->getRetValue();
+  // If there is no return value and it has the attribute this is an error.
+  // TODO: Flag error for bad attributes.
+  if (!RetE)
+    return;
+
+  ProgramStateRef State = C.getState();
+  // Taken from RetainCountChecker.
+  // We need to dig down to the symbolic base here because various
+  // custom allocators do sometimes return the symbol with an offset.
+  SymbolRef Sym = State->getSValAsScalarOrLoc(RetE, C.getLocationContext())
+                      .getAsLocSymbol(/*IncludeBaseRegions=*/true);
+  if (!Sym)
+    return;
+
+  const RefCount *Count = State->get<ObjectRefCountMap>(Sym);
+  // If we are not tracking we should return. This will be global variables,
+  // variables within structs which we can't track.
+  if (!Count)
+    return;
+
+  // Check if this is an over-release.
+  if (Count->getCount() == 0) {
+    reportRefCountBug(*ReturnNotOwnedForOwned, Sym, nullptr, C);
+    return;
+  }
+
+  // Otherwise, update the state as we are returning and consuming the value.
+  State = State->set<ObjectRefCountMap>(Sym, Count->decrement());
+
+  // Update this state transition as a increment.
+  C.addTransition(State);
+}
+
+/// Check if at the end of this function there is some bad state.
+///
+/// This will check for leaks and if we we are adhering to the return attribute.
+void ObjectCountChecker::checkEndFunction(const ReturnStmt *RS,
+                                          CheckerContext &C) const {
+  // Only check the upper most frame, don't check inline functions.
+  if (!C.inTopFrame())
+    return;
+
+  processReturnStatement(RS, C);
+}
+
+/// Report a ref count bug.
+void ObjectCountChecker::reportRefCountBug(
+    const retaincountchecker::RefCountBug &D, SymbolRef Sym,
+    const CallEvent *Call, CheckerContext &C) const {
   // We reached a bug, stop exploring the path here by generating a sink.
   ExplodedNode *ErrNode = C.generateErrorNode();
   // If we've already reached this node on another path, return.
@@ -401,8 +476,10 @@ void ObjectCountChecker::reportReleaseNotOwnedBug(SymbolRef Sym,
 
   // Generate the report.
   auto R = std::make_unique<retaincountchecker::RefCountReport>(
-      *ReleaseNotOwned, C.getASTContext().getLangOpts(), ErrNode, Sym);
-  R->addRange(Call.getSourceRange());
+      D, C.getASTContext().getLangOpts(), ErrNode, Sym);
+  if (Call) {
+    R->addRange(Call->getSourceRange());
+  }
   R->markInteresting(Sym);
   C.emitReport(std::move(R));
 }
@@ -412,6 +489,11 @@ void ento::registerObjectCountChecker(CheckerManager &Mgr) {
   Chk->ReleaseNotOwned = std::make_unique<retaincountchecker::RefCountBug>(
       Mgr.getCurrentCheckerName(),
       retaincountchecker::RefCountBug::ReleaseNotOwned);
+
+  Chk->ReturnNotOwnedForOwned =
+      std::make_unique<retaincountchecker::RefCountBug>(
+          Mgr.getCurrentCheckerName(),
+          retaincountchecker::RefCountBug::ReturnNotOwnedForOwned);
 }
 
 // This checker should be enabled regardless of how language options are set.

@@ -220,7 +220,7 @@ void test_escape_out_param(bar_t** out)
 }
 
 // Test assigning to a local does not escape.
-void test_no_escape_assignment() {
+void test_no_escape_assignment(void) {
   bar_t* bar = bar_create();
 
   object_acquire((header_t*)bar);
@@ -235,7 +235,8 @@ void test_no_escape_assignment() {
   object_release((header_t*)bar_three); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
 }
 
-void test_escape_through_assignment() {
+// Test assignment doesn't escape everything.
+void test_escape_through_assignment(void) {
   bar_t* bar = bar_create();
   bar_t* bar_two = bar;
   bar_t* bar_three = bar_create();
@@ -250,4 +251,37 @@ void test_escape_through_assignment() {
 
   object_release((header_t*)bar_three);
   object_release((header_t*)bar_three); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}
+
+// Test returning a not acquired reference.
+__OBJECT_RETURN_ACQUIRED bar_t* test_return_not_owned(void) {
+  return bar_from_none(); // expected-warning {{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
+}
+
+
+// Test return not owned through a parameter.
+__OBJECT_RETURN_ACQUIRED bar_t* test_return_not_owned_param(bar_t* bar) {
+  return bar; // expected-warning {{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
+}
+
+// Test returning NULL.
+// TODO: This should fail.
+__OBJECT_RETURN_ACQUIRED bar_t* test_return_null(void) {
+  return 0;
+}
+
+// Test returning an owned reference is fine.
+__OBJECT_RETURN_ACQUIRED bar_t* test_return_owned(void) {
+  return bar_create();
+}
+
+// Test returning a global variable will work.
+__OBJECT_RETURN_ACQUIRED bar_t* test_return_global(void) {
+  return global_storage;
+}
+
+// Test can return owned if we acquire a reference.
+__OBJECT_RETURN_ACQUIRED bar_t* test_reutrn_owned_param_after_acquire(bar_t* bar) {
+  object_acquire((header_t*)bar);
+  return bar;
 }
