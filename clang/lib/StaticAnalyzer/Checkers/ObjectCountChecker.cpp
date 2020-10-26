@@ -68,8 +68,8 @@ public:
   void Profile(llvm::FoldingSetNodeID &ID) const { ID.AddInteger(Cnt); }
 };
 
-class ObjectCountChecker
-    : public Checker<check::BeginFunction, check::PreCall, check::PostCall> {
+class ObjectCountChecker : public Checker<check::BeginFunction, check::PreCall,
+                                          check::PostCall, check::Bind> {
   CallDescription ObjectAcquireFn{"object_acquire"};
   CallDescription ObjectAutoreleaseFn{"object_autorelease"};
   CallDescription ObjectCreateFn{"object_create"};
@@ -102,12 +102,31 @@ public:
   void checkBeginFunction(CheckerContext &C) const;
   void checkPreCall(const CallEvent &Call, CheckerContext &C) const;
   void checkPostCall(const CallEvent &Call, CheckerContext &C) const;
+  void checkBind(SVal loc, SVal val, const Stmt *S, CheckerContext &C) const;
 };
 
 } // end anonymous namespace
 
 /// State of object symbol refs to their reference count.
 REGISTER_MAP_WITH_PROGRAMSTATE(ObjectRefCountMap, SymbolRef, RefCount)
+
+namespace {
+
+/// Visitor which will remove all visited symbols from the ObjectRefCountMap.
+class StopTrackingCallback final : public SymbolVisitor {
+  ProgramStateRef State;
+
+public:
+  StopTrackingCallback(ProgramStateRef state) : State(std::move(state)) {}
+  ProgramStateRef getState() const { return State; }
+
+  bool VisitSymbol(SymbolRef Sym) override {
+    State = State->remove<ObjectRefCountMap>(Sym);
+    return true;
+  }
+};
+
+} // namespace
 
 /// Does this function decl have the no analysis annotation.
 ///
@@ -331,6 +350,42 @@ void ObjectCountChecker::checkPostCall(const CallEvent &Call,
     postCallReturnsAcquiredAttr(Call, C);
   } else {
     postCallUnowned(Call, C);
+  }
+}
+
+/// Whether the memory region should escape and not be tracked.
+///
+/// We escape when it is assigned something not on the stack or it is assigned
+/// to a struct field.
+static bool shouldEscape(const MemRegion *MR) {
+  // If this is assigned to something not on the stack, we cannot track it
+  // anymore.
+  if (!MR->hasStackStorage())
+    return true;
+
+  const auto *VR = dyn_cast<VarRegion>(MR);
+  // If we are assigning this to a struct then stop tracking. (Not 100% this is
+  // what this line does.)
+  if (!VR)
+    return true;
+
+  return false;
+}
+
+/// Set escaped counter as soon as we bind this to a struct or global.
+///
+/// We allow binding to stack variables (we keep tracking that) but as soon as
+/// we bind to a struct we cannot track this further.
+void ObjectCountChecker::checkBind(SVal loc, SVal val, const Stmt *S,
+                                   CheckerContext &C) const {
+  ProgramStateRef State = C.getState();
+  const MemRegion *MR = loc.getAsRegion();
+
+  if (MR && shouldEscape(MR)) {
+    // Find all symbols that 'val' references that we are tracking and stop
+    // tracking them.
+    State = State->scanReachableSymbols<StopTrackingCallback>(val).getState();
+    C.addTransition(State);
   }
 }
 

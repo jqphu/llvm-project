@@ -174,7 +174,80 @@ void test_unowned_over_release(void) {
   object_release((header_t*)bar); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
 }
 
+// Test unowned objects don't trigger any errors.
 void test_unowned_non_object(void) {
   // We will create state for this, but do no analysis.
   _Bool value = maybe();
+}
+
+// Global storage for bar, helper.
+bar_t* global_storage;
+
+// Assigning to globals will stop us from doing analysis.
+void test_escape_global(void) {
+  bar_t* bar = bar_create();
+  global_storage = bar;
+
+  // No errors here since we stop tracking bar.
+  object_release((header_t*)bar);
+  object_release((header_t*)bar);
+}
+
+// Holder for bar.
+typedef struct {
+  bar_t* bar;
+} bar_holder_t;
+
+// Test escaping by storing in struct stops analyzing.
+void test_escape_param(bar_holder_t* holder) {
+  bar_t* bar = bar_create();
+  holder->bar = bar;
+
+  // No errors here since we stop tracking bar.
+  // TODO: We can actually track this.
+  object_release((header_t*)bar);
+  object_release((header_t*)bar);
+}
+
+// Test escaping from out param stops analyzing.
+void test_escape_out_param(bar_t** out)
+{
+  bar_t* bar = bar_create();
+  *out = bar;
+
+  object_release((header_t*)bar);
+  object_release((header_t*)bar);
+}
+
+// Test assigning to a local does not escape.
+void test_no_escape_assignment() {
+  bar_t* bar = bar_create();
+
+  object_acquire((header_t*)bar);
+  bar_t* bar_two = bar;
+
+  object_acquire((header_t*)bar_two);
+  bar_t* bar_three = bar_two;
+
+  object_release((header_t*)bar_three);
+  object_release((header_t*)bar_three);
+  object_release((header_t*)bar_three);
+  object_release((header_t*)bar_three); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}
+
+void test_escape_through_assignment() {
+  bar_t* bar = bar_create();
+  bar_t* bar_two = bar;
+  bar_t* bar_three = bar_create();
+
+  // This should stop tracking both bar and bar_two but not bar_three.
+  global_storage = bar_two;
+
+  object_release((header_t*)bar);
+  object_release((header_t*)bar);
+  object_release((header_t*)bar_two);
+  object_release((header_t*)bar_two);
+
+  object_release((header_t*)bar_three);
+  object_release((header_t*)bar_three); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
 }
