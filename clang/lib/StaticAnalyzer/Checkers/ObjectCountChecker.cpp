@@ -87,6 +87,10 @@ class ObjectCountChecker
   void postCallReturnsAcquiredAttr(const CallEvent &Call,
                                    CheckerContext &C) const;
 
+  /// Handle the post call logic for a function that returns a
+  /// non-owned object.
+  void postCallUnowned(const CallEvent &Call, CheckerContext &C) const;
+
 public:
   /// The bug to signal when we release something we don't own.
   ///
@@ -281,6 +285,38 @@ void ObjectCountChecker::postCallReturnsAcquiredAttr(const CallEvent &Call,
   C.addTransition(State);
 }
 
+/// Handle the post call logic for a function that returns a
+/// non-owned object.
+///
+/// This will optimistically assume that what is returned is a managed object
+/// and create the state to start tracking it.
+///
+/// This is more expensive computationally but is still correct even for
+/// non-managed objects. The reason it is still correct is / this value will
+/// start with 0 (not leaked) and only change if the caller CONSUMED it or
+/// acquired on it. Therefore, / unless they acquired/consumed on an non-managed
+/// object it is already incorrect. That means this will not provide false
+/// positives.
+void ObjectCountChecker::postCallUnowned(const CallEvent &Call,
+                                         CheckerContext &C) const {
+  SymbolRef Sym = Call.getReturnValue().getAsSymbol();
+  // Non symbolic return values are ignored.
+  if (!Sym)
+    return;
+
+  ProgramStateRef State = C.getState();
+  // Just to verify, this symbol should not be tracked at all (return value from
+  // a function).
+  const RefCount *Count = State->get<ObjectRefCountMap>(Sym);
+  assert(!Count);
+
+  // Create the state as owned.
+  State = State->set<ObjectRefCountMap>(Sym, RefCount::makeUnowned());
+
+  // Update this state transition as a increment.
+  C.addTransition(State);
+}
+
 /// Called after a function invocation to see if references counts need to be
 /// incremented (e.g. object_acquire) or if the function returns an object we
 /// now need to track.
@@ -293,6 +329,8 @@ void ObjectCountChecker::checkPostCall(const CallEvent &Call,
     postCallObjectAcquire(Call, C);
   } else if (Call.getDecl()->hasAttr<ObjectReturnsAcquiredAttr>()) {
     postCallReturnsAcquiredAttr(Call, C);
+  } else {
+    postCallUnowned(Call, C);
   }
 }
 

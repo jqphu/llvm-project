@@ -152,3 +152,29 @@ void test_custom_acquired_many_release() {
   object_release((header_t*)bar);
   object_release((header_t*)bar); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
 }
+
+// Custom returning unowned pointer.
+bar_t* bar_from_none(void);
+
+// Test that warnings are not triggered since this is unowned.
+void test_unowned(void) {
+  bar_t* bar = bar_from_none();
+}
+
+// Test we can acquire/release without warnings.
+void test_unowned_acquire_release(void) {
+  bar_t* bar = bar_from_none();
+  object_acquire((header_t*)bar);
+  object_release((header_t*)bar);
+}
+
+// Test that releasing something unowned is an error.
+void test_unowned_over_release(void) {
+  bar_t* bar = bar_from_none();
+  object_release((header_t*)bar); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}
+
+void test_unowned_non_object(void) {
+  // We will create state for this, but do no analysis.
+  _Bool value = maybe();
+}
