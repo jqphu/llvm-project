@@ -136,3 +136,19 @@ __OBJECT_NO_ANALYSIS void test_no_analysis(header_t* foo) {
   object_release(foo);
   object_release(foo);
 }
+
+// Custom create function.
+__OBJECT_RETURN_ACQUIRED bar_t* bar_create(void);
+
+// Can call release on a custom created object.
+void test_custom_acquired() {
+  bar_t* bar = bar_create();
+  object_release((header_t*)bar);
+}
+
+// Can catch leaks from our custom create.
+void test_custom_acquired_many_release() {
+  bar_t* bar = bar_create();
+  object_release((header_t*)bar);
+  object_release((header_t*)bar); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}

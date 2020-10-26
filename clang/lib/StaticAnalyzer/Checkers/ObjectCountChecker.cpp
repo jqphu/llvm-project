@@ -82,6 +82,11 @@ class ObjectCountChecker
   /// Handle the post call for `object_acquire`.
   void postCallObjectAcquire(const CallEvent &Call, CheckerContext &C) const;
 
+  /// Handle the post call logic for a function that has the
+  /// object_returns_acquired attribute.
+  void postCallReturnsAcquiredAttr(const CallEvent &Call,
+                                   CheckerContext &C) const;
+
 public:
   /// The bug to signal when we release something we don't own.
   ///
@@ -250,6 +255,32 @@ void ObjectCountChecker::postCallObjectAcquire(const CallEvent &Call,
   C.addTransition(State);
 }
 
+/// Handle the post call logic for a function that has the
+/// object_returns_acquired attribute.
+///
+/// We create the state transition for all functions that have this attribute.
+void ObjectCountChecker::postCallReturnsAcquiredAttr(const CallEvent &Call,
+                                                     CheckerContext &C) const {
+  SymbolRef Sym = Call.getReturnValue().getAsSymbol();
+  // This should exist or else it is an incorrect usage of the attribute.
+  // TODO: Report incorrect use of attribute?
+  if (!Sym)
+    return;
+
+  ProgramStateRef State = C.getState();
+
+  // Just to verify, this symbol should not be tracked at all (return value from
+  // a function).
+  const RefCount *Count = State->get<ObjectRefCountMap>(Sym);
+  assert(!Count);
+
+  // Create the state as owned.
+  State = State->set<ObjectRefCountMap>(Sym, RefCount::makeOwned());
+
+  // Update this state transition as a increment.
+  C.addTransition(State);
+}
+
 /// Called after a function invocation to see if references counts need to be
 /// incremented (e.g. object_acquire) or if the function returns an object we
 /// now need to track.
@@ -260,8 +291,8 @@ void ObjectCountChecker::checkPostCall(const CallEvent &Call,
                                        CheckerContext &C) const {
   if (Call.isCalled(ObjectAcquireFn)) {
     postCallObjectAcquire(Call, C);
-  } else {
-    // TODO: Handle the object_returns_acquired attribute.
+  } else if (Call.getDecl()->hasAttr<ObjectReturnsAcquiredAttr>()) {
+    postCallReturnsAcquiredAttr(Call, C);
   }
 }
 
