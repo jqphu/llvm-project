@@ -285,3 +285,28 @@ __OBJECT_RETURN_ACQUIRED bar_t* test_reutrn_owned_param_after_acquire(bar_t* bar
   object_acquire((header_t*)bar);
   return bar;
 }
+
+/// Test that leaks are detected.
+void test_leak(void) {
+  header_t* foo = object_create();
+} // expected-warning {{Object is potentially being leaked}}
+
+/// Test that multiple leaks are reported.
+void test_multiple_leak(void) {
+  bar_t* bar = bar_create();
+  header_t* foo = object_create();
+
+  object_acquire(foo);
+} // expected-warning {{Object is potentially being leaked}}
+
+/// Test that leaks across branches are detected.
+void test_leak_branch(void) {
+  bar_t* bar = bar_create();
+
+  if(maybe()) {
+    return;
+  }
+
+  object_release((header_t*)bar);
+} // expected-warning {{Object is potentially being leaked}}
+

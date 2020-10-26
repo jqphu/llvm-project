@@ -95,19 +95,25 @@ class ObjectCountChecker
 
   /// Handle logic around the return statement.
   /// E.g. Are we returning owned references correctly?
-  void processReturnStatement(const ReturnStmt *RS, CheckerContext &C) const;
+  ExplodedNode *processReturnStatement(const ReturnStmt *RS,
+                                       CheckerContext &C) const;
+
+  /// Check if anything is leaking
+  void processLeaks(CheckerContext &C, ExplodedNode *Pred) const;
 
 public:
   /// BugTypes below are initialized when we register the checker.
   ///
   /// We reuse this bug type from RetainCountDiagnostics.
 
-  /// The bug to signal when we release something we don't own.
+  /// Bug to signal when we release something we don't own.
   std::unique_ptr<retaincountchecker::RefCountBug> ReleaseNotOwned{nullptr};
   /// Bug to signal when we return an unowned reference when expected an owned
   /// one.
   std::unique_ptr<retaincountchecker::RefCountBug> ReturnNotOwnedForOwned{
       nullptr};
+  /// Bug to signal we are leaking when we return.
+  std::unique_ptr<retaincountchecker::RefCountBug> LeakAtReturn{nullptr};
 
   void checkBeginFunction(CheckerContext &C) const;
   void checkEndFunction(const ReturnStmt *RS, CheckerContext &C) const;
@@ -255,10 +261,10 @@ void ObjectCountChecker::checkPreCall(const CallEvent &Call,
 
     // Update the state to consume a reference.
     State = State->set<ObjectRefCountMap>(Sym, Count->decrement());
-
-    // Update this state transition as a decrement.
-    C.addTransition(State);
   }
+
+  // Update this state transition as a decrement.
+  C.addTransition(State);
 }
 /// Handle the post call logic for `object_acquire`.
 ///
@@ -400,8 +406,56 @@ void ObjectCountChecker::checkBind(SVal loc, SVal val, const Stmt *S,
   }
 }
 
-void ObjectCountChecker::processReturnStatement(const ReturnStmt *RS,
-                                                CheckerContext &C) const {
+/// Check if anything is leaking.
+///
+/// This will error if we have anything tracked that has a reference count >0.
+void ObjectCountChecker::processLeaks(CheckerContext &C,
+                                      ExplodedNode *Pred) const {
+  ProgramStateRef State = Pred->getState();
+  SmallVector<SymbolRef, 10> Leaked;
+
+  // Loop through all remaining objects.
+  for (const auto &I : State->get<ObjectRefCountMap>()) {
+    SymbolRef Sym = I.first;
+    const RefCount &Count = I.second;
+
+    // Still have lingering reference counts, leaked!
+    if (Count.getCount() != 0) {
+      Leaked.push_back(Sym);
+    }
+  }
+
+  // Generate transition to represent leak location.
+  // We need to pass the Pred node here since we may have exploded the graph
+  // before returning from this step. This will prevent duplicate nodes at the
+  // same location.
+  ExplodedNode *N = C.addTransition(State, Pred);
+  if (!N)
+    return;
+
+  for (SymbolRef Sym : Leaked) {
+    // Dumb leak detection analysis. We should do something smarter like
+    // RetainCountDiagnostics.cpp which walks the allocation chain.
+    // We will keep this since at least we see there is a bug and a path.
+    // TODO: We need to use walkers to show something useful.
+    auto R = std::make_unique<PathSensitiveBugReport>(
+        *LeakAtReturn, "Object is potentially being leaked.", N);
+    R->markInteresting(Sym);
+    C.emitReport(std::move(R));
+  }
+}
+
+/// Check if we are adhering to the return attribute.
+///
+/// This will report an error if we are returning something with a reference of
+/// 0 to something that has an attribute returned.
+///
+/// Otherwise, it will consume a reference. The leak detector will determine if
+/// this is still leaking.
+ExplodedNode *
+ObjectCountChecker::processReturnStatement(const ReturnStmt *RS,
+                                           CheckerContext &C) const {
+  ExplodedNode *Pred = C.getPredecessor();
   const LocationContext *LCtx = C.getLocationContext();
   const Decl *D = LCtx->getDecl();
   const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(D);
@@ -411,18 +465,18 @@ void ObjectCountChecker::processReturnStatement(const ReturnStmt *RS,
   // Since we only care about C, we ignore constructors, destructors, blocks
   // etc. This can be expanded by converting this to an AnyCall.
   if (!FD || hasNoAnalysisAnnotation(FD))
-    return;
+    return Pred;
 
   // If we don't have the return acquired attribute, we do nothing.
   // If there are any leaks, it will be detected in the leak step.
   if (!FD->hasAttr<ObjectReturnsAcquiredAttr>())
-    return;
+    return Pred;
 
   const Expr *RetE = RS->getRetValue();
   // If there is no return value and it has the attribute this is an error.
   // TODO: Flag error for bad attributes.
   if (!RetE)
-    return;
+    return Pred;
 
   ProgramStateRef State = C.getState();
   // Taken from RetainCountChecker.
@@ -431,25 +485,27 @@ void ObjectCountChecker::processReturnStatement(const ReturnStmt *RS,
   SymbolRef Sym = State->getSValAsScalarOrLoc(RetE, C.getLocationContext())
                       .getAsLocSymbol(/*IncludeBaseRegions=*/true);
   if (!Sym)
-    return;
+    return Pred;
 
   const RefCount *Count = State->get<ObjectRefCountMap>(Sym);
   // If we are not tracking we should return. This will be global variables,
   // variables within structs which we can't track.
   if (!Count)
-    return;
+    return Pred;
 
   // Check if this is an over-release.
   if (Count->getCount() == 0) {
     reportRefCountBug(*ReturnNotOwnedForOwned, Sym, nullptr, C);
-    return;
+    Pred = C.addTransition(State);
+    return Pred;
   }
 
   // Otherwise, update the state as we are returning and consuming the value.
   State = State->set<ObjectRefCountMap>(Sym, Count->decrement());
 
   // Update this state transition as a increment.
-  C.addTransition(State);
+  Pred = C.addTransition(State);
+  return Pred;
 }
 
 /// Check if at the end of this function there is some bad state.
@@ -461,10 +517,13 @@ void ObjectCountChecker::checkEndFunction(const ReturnStmt *RS,
   if (!C.inTopFrame())
     return;
 
-  processReturnStatement(RS, C);
+  ExplodedNode *Pred = processReturnStatement(RS, C);
+  processLeaks(C, Pred);
 }
 
 /// Report a ref count bug.
+///
+/// This is a terminal operation and will stop the analysis going further.
 void ObjectCountChecker::reportRefCountBug(
     const retaincountchecker::RefCountBug &D, SymbolRef Sym,
     const CallEvent *Call, CheckerContext &C) const {
@@ -494,6 +553,10 @@ void ento::registerObjectCountChecker(CheckerManager &Mgr) {
       std::make_unique<retaincountchecker::RefCountBug>(
           Mgr.getCurrentCheckerName(),
           retaincountchecker::RefCountBug::ReturnNotOwnedForOwned);
+
+  Chk->LeakAtReturn = std::make_unique<retaincountchecker::RefCountBug>(
+      Mgr.getCurrentCheckerName(),
+      retaincountchecker::RefCountBug::LeakAtReturn);
 }
 
 // This checker should be enabled regardless of how language options are set.
