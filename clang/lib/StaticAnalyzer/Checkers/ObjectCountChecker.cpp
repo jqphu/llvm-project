@@ -70,7 +70,7 @@ public:
 
 class ObjectCountChecker
     : public Checker<check::BeginFunction, check::EndFunction, check::PreCall,
-                     check::PostCall, check::Bind> {
+                     check::PostCall, check::Bind, check::DeadSymbols> {
   CallDescription ObjectAcquireFn{"object_acquire"};
   CallDescription ObjectAutoreleaseFn{"object_autorelease"};
   CallDescription ObjectCreateFn{"object_create"};
@@ -114,12 +114,15 @@ public:
       nullptr};
   /// Bug to signal we are leaking when we return.
   std::unique_ptr<retaincountchecker::RefCountBug> LeakAtReturn{nullptr};
+  /// Bug to signal we are leaking within our function.
+  std::unique_ptr<retaincountchecker::RefCountBug> LeakWithinFunction{nullptr};
 
   void checkBeginFunction(CheckerContext &C) const;
   void checkEndFunction(const ReturnStmt *RS, CheckerContext &C) const;
   void checkPreCall(const CallEvent &Call, CheckerContext &C) const;
   void checkPostCall(const CallEvent &Call, CheckerContext &C) const;
   void checkBind(SVal loc, SVal val, const Stmt *S, CheckerContext &C) const;
+  void checkDeadSymbols(SymbolReaper &SymReaper, CheckerContext &C) const;
 };
 
 } // end anonymous namespace
@@ -521,6 +524,50 @@ void ObjectCountChecker::checkEndFunction(const ReturnStmt *RS,
   processLeaks(C, Pred);
 }
 
+/// Check as soon as symbol is dead if it is leaked.
+void ObjectCountChecker::checkDeadSymbols(SymbolReaper &SymReaper,
+                                          CheckerContext &C) const {
+  // TODO: Share this code with processLeaks;
+  ProgramStateRef State = C.getState();
+  SmallVector<SymbolRef, 10> Leaked;
+
+  // Loop through all remaining objects.
+  for (const auto &I : State->get<ObjectRefCountMap>()) {
+    SymbolRef Sym = I.first;
+    const RefCount &Count = I.second;
+    bool IsSymDead = SymReaper.isDead(Sym);
+
+    // Skip non-dead symbols.
+    if (!IsSymDead)
+      continue;
+
+    // Still have lingering reference counts, leaked!
+    if (Count.getCount() != 0) {
+      Leaked.push_back(Sym);
+    }
+
+    // As a little optimization, remove this from the map.
+    if (IsSymDead)
+      State = State->remove<ObjectRefCountMap>(Sym);
+  }
+
+  // Generate transition to represent leak location.
+  ExplodedNode *N = C.addTransition(State);
+  if (!N)
+    return;
+
+  for (SymbolRef Sym : Leaked) {
+    // Dumb leak detection analysis. We should do something smarter like
+    // RetainCountDiagnostics.cpp which walks the allocation chain.
+    // We will keep this since at least we see there is a bug and a path.
+    // TODO: We need to use walkers to show something useful.
+    auto R = std::make_unique<PathSensitiveBugReport>(
+        *LeakWithinFunction, "Object is potentially being leaked.", N);
+    R->markInteresting(Sym);
+    C.emitReport(std::move(R));
+  }
+}
+
 /// Report a ref count bug.
 ///
 /// This is a terminal operation and will stop the analysis going further.
@@ -557,6 +604,10 @@ void ento::registerObjectCountChecker(CheckerManager &Mgr) {
   Chk->LeakAtReturn = std::make_unique<retaincountchecker::RefCountBug>(
       Mgr.getCurrentCheckerName(),
       retaincountchecker::RefCountBug::LeakAtReturn);
+
+  Chk->LeakWithinFunction = std::make_unique<retaincountchecker::RefCountBug>(
+      Mgr.getCurrentCheckerName(),
+      retaincountchecker::RefCountBug::LeakWithinFunction);
 }
 
 // This checker should be enabled regardless of how language options are set.

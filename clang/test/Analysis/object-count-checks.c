@@ -294,7 +294,7 @@ void test_leak(void) {
 /// Test that multiple leaks are reported.
 void test_multiple_leak(void) {
   bar_t* bar = bar_create();
-  header_t* foo = object_create();
+  header_t* foo = object_create(); // expected-warning {{Object is potentially being leaked}}
 
   object_acquire(foo);
 } // expected-warning {{Object is potentially being leaked}}
@@ -304,9 +304,28 @@ void test_leak_branch(void) {
   bar_t* bar = bar_create();
 
   if(maybe()) {
-    return;
+    return; // expected-warning {{Object is potentially being leaked}}
   }
 
   object_release((header_t*)bar);
+}
+
+/// Test that object is being leaked at return point.
+void test_leak_at_return(__OBJECT_CONSUMED bar_t* bar) {
 } // expected-warning {{Object is potentially being leaked}}
 
+/// Test complex path for object
+void test_multiple_errors(header_t* foo) {
+  if(maybe()) {
+    object_acquire(foo);
+
+    if(maybe()) {
+      object_acquire(foo);
+      goto done;
+    }
+  }
+
+  object_release(foo); // expected-warning {{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+done:
+  (void)0; // expected-warning {{Object is potentially being leaked}}
+}
