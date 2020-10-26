@@ -17,12 +17,14 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "RetainCountChecker/RetainCountDiagnostics.h"
 #include "clang/AST/Attr.h"
 #include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramStateTrait.h"
+#include <memory>
 
 using namespace clang;
 using namespace ento;
@@ -50,6 +52,9 @@ public:
   /// This object has a reference count of 1.
   LLVM_NODISCARD static RefCount makeOwned() { return RefCount(1); }
 
+  /// Create a new RefCount that has the count decremented.
+  LLVM_NODISCARD RefCount decrement() const { return RefCount(Cnt - 1); }
+
   /// Get the count for this object.
   LLVM_NODISCARD unsigned getCount() const { return Cnt; }
 
@@ -59,14 +64,27 @@ public:
   void Profile(llvm::FoldingSetNodeID &ID) const { ID.AddInteger(Cnt); }
 };
 
-class ObjectCountChecker : public Checker<check::BeginFunction> {
+class ObjectCountChecker
+    : public Checker<check::BeginFunction, check::PreCall> {
   CallDescription ObjectAcquireFn{"object_acquire"};
   CallDescription ObjectAutoreleaseFn{"object_autorelease"};
   CallDescription ObjectCreateFn{"object_create"};
   CallDescription ObjectReleaseFn{"object_release"};
 
+  /// Report a bug as ReleaseNotOwned.
+  void reportReleaseNotOwnedBug(SymbolRef Sym, const CallEvent &Call,
+                                CheckerContext &C) const;
+
 public:
+  /// The bug to signal when we release something we don't own.
+  ///
+  /// This is initialized when we register this checker.
+  ///
+  /// We borrow this bug type from RetainCountDiagnostics.
+  std::unique_ptr<retaincountchecker::RefCountBug> ReleaseNotOwned{nullptr};
+
   void checkBeginFunction(CheckerContext &C) const;
+  void checkPreCall(const CallEvent &Call, CheckerContext &C) const;
 };
 
 } // end anonymous namespace
@@ -144,11 +162,84 @@ void ObjectCountChecker::checkBeginFunction(CheckerContext &C) const {
   C.addTransition(State);
 }
 
-void ento::registerObjectCountChecker(CheckerManager &mgr) {
-  mgr.registerChecker<ObjectCountChecker>();
+/// Called before a function invocation to see if references are being
+/// consumed. Triggers errors if too many references are consumed.
+///
+/// This function will look for the `object_consumed` attribute and proceed to
+/// consume references. If the object state doesn't exist (e.g. If we accessed
+/// it not through the top level parameter but rather indirectly through and
+/// object) we do nothing.
+void ObjectCountChecker::checkPreCall(const CallEvent &Call,
+                                      CheckerContext &C) const {
+  const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(Call.getDecl());
+  // Skip all non-functions.
+  if (!FD)
+    return;
+
+  ProgramStateRef State = C.getState();
+  for (unsigned idx = 0, e = FD->param_size(); idx != e; ++idx) {
+    const ParmVarDecl *Param = FD->parameters()[idx];
+
+    // If there is no attribute, we just continue. This is done first since the
+    // attribute is unlikely to exist making this step skip fast.
+    if (!Param->hasAttr<ObjectConsumedAttr>())
+      continue;
+
+    // Here we call getAsLocSymbol as the parameter represents a memory
+    // location and we want the symbol that represents that location.
+    SymbolRef Sym = Call.getArgSVal(idx).getAsLocSymbol();
+
+    // Skip non-pointers to memory regions.
+    if (!Sym)
+      continue;
+
+    const RefCount *Count = State->get<ObjectRefCountMap>(Sym);
+    // Skip those objects that were not already tracked.
+    // This helps protect us analyzing global variables and variables within
+    // objects.
+    if (!Count)
+      continue;
+
+    // Check if this is an over-release.
+    if (Count->getCount() == 0) {
+      reportReleaseNotOwnedBug(Sym, Call, C);
+      return;
+    }
+
+    // Update the state to consume a reference.
+    State = State->set<ObjectRefCountMap>(Sym, Count->decrement());
+
+    // Update this state transition as a decrement.
+    C.addTransition(State);
+  }
+}
+
+/// Report a bug as ReleaseNotOwned.
+void ObjectCountChecker::reportReleaseNotOwnedBug(SymbolRef Sym,
+                                                  const CallEvent &Call,
+                                                  CheckerContext &C) const {
+  // We reached a bug, stop exploring the path here by generating a sink.
+  ExplodedNode *ErrNode = C.generateErrorNode();
+  // If we've already reached this node on another path, return.
+  if (!ErrNode)
+    return;
+
+  // Generate the report.
+  auto R = std::make_unique<retaincountchecker::RefCountReport>(
+      *ReleaseNotOwned, C.getASTContext().getLangOpts(), ErrNode, Sym);
+  R->addRange(Call.getSourceRange());
+  R->markInteresting(Sym);
+  C.emitReport(std::move(R));
+}
+
+void ento::registerObjectCountChecker(CheckerManager &Mgr) {
+  auto *Chk = Mgr.registerChecker<ObjectCountChecker>();
+  Chk->ReleaseNotOwned = std::make_unique<retaincountchecker::RefCountBug>(
+      Mgr.getCurrentCheckerName(),
+      retaincountchecker::RefCountBug::ReleaseNotOwned);
 }
 
 // This checker should be enabled regardless of how language options are set.
-bool ento::shouldRegisterObjectCountChecker(const CheckerManager &mgr) {
+bool ento::shouldRegisterObjectCountChecker(const CheckerManager &Mgr) {
   return true;
 }
